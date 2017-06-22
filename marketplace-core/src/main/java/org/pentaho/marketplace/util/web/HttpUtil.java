@@ -12,23 +12,21 @@
  * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  * See the GNU Lesser General Public License for more details.
  *
- * Copyright (c) 2015 Pentaho Corporation. All rights reserved.
+ * Copyright (c) 2017 Pentaho Corporation. All rights reserved.
  */
 
 package org.pentaho.marketplace.util.web;
 
-import org.apache.commons.httpclient.HostConfiguration;
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.HttpConnectionManager;
-import org.apache.commons.httpclient.SimpleHttpConnectionManager;
-import org.apache.commons.httpclient.UsernamePasswordCredentials;
-import org.apache.commons.httpclient.auth.AuthScope;
-import org.apache.commons.httpclient.methods.GetMethod;
-import org.apache.commons.httpclient.params.HttpConnectionManagerParams;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-
+import org.apache.http.HttpResponse;
+import org.apache.http.HttpStatus;
+import org.apache.http.auth.AuthScope;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.LaxRedirectStrategy;
+import org.pentaho.di.core.util.ApacheHttpClientFactory;
 
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -45,51 +43,42 @@ public class HttpUtil {
   private static final String PROXY_USER_PROPERTY_NAME = "http.proxyUser";
   private static final String PROXY_PASSWORD_PROPERTY_NAME = "http.proxyPassword";
 
+  private static final int CONNECTION_TIMEOUT = 3000;
+  private static final int PAGE_TIMEOUT = 7000;
+
   private static Log logger = LogFactory.getLog( HttpUtil.class );
 
   public static HttpClient getClient() {
+    LaxRedirectStrategy strategy = new LaxRedirectStrategy();
 
-    int connectionTimeout = 3000;
-    int pageTimeout = 7000;
-    HttpConnectionManager connectionManager = new SimpleHttpConnectionManager();
-    HttpConnectionManagerParams connectionParams = connectionManager.getParams();
-    connectionParams.setConnectionTimeout( connectionTimeout );
-    connectionParams.setSoTimeout( pageTimeout );
+    ApacheHttpClientFactory clientFactory = ApacheHttpClientFactory.getInstance();
 
-    HttpClient httpClient = null;
-    if ( connectionManager != null ) {
-      httpClient = new HttpClient( connectionManager );
-    }
-
+    HttpClient client = null;
     try {
-      HostConfiguration hostConfig = null;
       final String proxyHost = System.getProperty( PROXY_HOST_PROPERTY_NAME );
       final int proxyPort = Integer.parseInt( System.getProperty( PROXY_PORT_PROPERTY_NAME ) );
       if ( StringUtils.isNotEmpty( proxyHost ) ) {
-        hostConfig = new HostConfiguration() {
-          @Override
-          public synchronized String getProxyHost() {
-            return proxyHost;
-          }
-
-          @Override
-          public synchronized int getProxyPort() {
-            return proxyPort;
-          }
-        };
-        httpClient.setHostConfiguration( hostConfig );
         String proxyUser = System.getProperty( PROXY_USER_PROPERTY_NAME );
         String proxyPassword = System.getProperty( PROXY_PASSWORD_PROPERTY_NAME );
-        if ( proxyUser != null && proxyUser.trim().length() > 0 ) {
-          httpClient.getState().setProxyCredentials(
-              new AuthScope( proxyHost, proxyPort ),
-              new UsernamePasswordCredentials( proxyUser, proxyPassword )
-          );
+        if ( StringUtils.isNotBlank( proxyUser ) ) {
+          AuthScope authScope = new AuthScope( proxyHost, proxyPort );
+          client = clientFactory
+            .createHttpClient( CONNECTION_TIMEOUT, PAGE_TIMEOUT, proxyUser, proxyPassword, proxyHost, proxyPort,
+              authScope, strategy );
+        } else {
+          client = clientFactory.createHttpClient( CONNECTION_TIMEOUT, PAGE_TIMEOUT, proxyHost, proxyPort, strategy );
         }
+      } else {
+        client = clientFactory.createHttpClient( CONNECTION_TIMEOUT, PAGE_TIMEOUT, strategy );
       }
-    } catch ( Exception ignored ) { }
-
-    return httpClient;
+    } catch ( Exception ignored ) {
+      logger.debug( "Cannot create custom HttpClient." );
+    }
+    if ( client == null ) {
+      logger.debug( "Trying create default HttpClient." );
+      client = clientFactory.createHttpClient();
+    }
+    return client;
   }
 
   public static boolean getURLContent( final String url, final StringBuffer content ) {
@@ -121,16 +110,16 @@ public class HttpUtil {
   }
 
   public static InputStream getURLInputStream( final String url ) {
-    HttpClient httpClient = HttpUtil.getClient();
-
+    HttpClient client = HttpUtil.getClient();
     try {
-      GetMethod call = new GetMethod( url );
-      call.setFollowRedirects( true );
+      HttpGet call = new HttpGet( url );
 
-      int status = httpClient.executeMethod( call );
-      if ( status == 200 ) {
-        return call.getResponseBodyAsStream();
+      HttpResponse response = client.execute( call );
+      int status = response.getStatusLine().getStatusCode();
+      if ( status == HttpStatus.SC_OK ) {
+        return response.getEntity().getContent();
       }
+      logger.debug( "The status code is not \"ok\": " + status );
       return null;
     } catch ( Throwable e ) {
       logger.debug( "Unable to get input stream from " + url, e );
